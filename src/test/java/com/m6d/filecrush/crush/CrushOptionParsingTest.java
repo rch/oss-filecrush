@@ -50,8 +50,8 @@ public class CrushOptionParsingTest {
 
 		job.set("fs.default.name", "file:///");
 		job.set("fs.file.impl", "org.apache.hadoop.fs.LocalFileSystem");
-		job.setInt("mapred.reduce.tasks", 20);
-		job.setLong("dfs.block.size", 1024 * 1024 * 64);
+		job.setInt("mapreduce.job.reduces", 20);
+		job.setLong("dfs.blocksize", 1024 * 1024 * 64);
 
 		FileSystem fs = FileSystem.get(job);
 		fs.setWorkingDirectory(new Path(tmp.getRoot().getAbsolutePath()));
@@ -309,10 +309,10 @@ public class CrushOptionParsingTest {
 
 		JobConf job = crush.getJob();
 
-		assertThat(job.get("mapred.reduce.tasks"), equalTo("20"));
-		assertThat(job.get("mapred.output.compress"), equalTo("true"));
-		assertThat(job.get("mapred.output.compression.type"), equalTo("BLOCK"));
-		assertThat(job.get("mapred.output.compression.codec"), equalTo("org.apache.hadoop.io.compress.DefaultCodec"));
+		assertThat(job.get("mapreduce.job.reduces"), equalTo("20"));
+		assertThat(job.get("mapreduce.output.fileoutputformat.compress"), equalTo("true"));
+		assertThat(job.get("mapreduce.output.fileoutputformat.compress.type"), equalTo("BLOCK"));
+		assertThat(job.get("mapreduce.output.fileoutputformat.compress.codec"), equalTo("org.apache.hadoop.io.compress.DefaultCodec"));
 
 		assertThat(crush.getMaxFileBlocks(), equalTo(8));
 
@@ -336,8 +336,8 @@ public class CrushOptionParsingTest {
 
 		JobConf job = crush.getJob();
 
-		assertThat(job.get("mapred.reduce.tasks"), equalTo("20"));
-		assertThat(job.get("mapred.output.compress"), equalTo("false"));
+		assertThat(job.get("mapreduce.job.reduces"), equalTo("20"));
+		assertThat(job.get("mapreduce.output.fileoutputformat.compress"), equalTo("false"));
 
 		assertThat(crush.getMaxFileBlocks(), equalTo(8));
 
@@ -374,9 +374,9 @@ public class CrushOptionParsingTest {
 
 		JobConf job = crush.getJob();
 
-		assertThat(job.get("mapred.reduce.tasks"), equalTo("20"));
-		assertThat(job.get("mapred.output.compress"), equalTo("true"));
-		assertThat(job.get("mapred.output.compression.codec"), equalTo("org.apache.hadoop.io.compress.DefaultCodec"));
+		assertThat(job.get("mapreduce.job.reduces"), equalTo("20"));
+		assertThat(job.get("mapreduce.output.fileoutputformat.compress"), equalTo("true"));
+		assertThat(job.get("mapreduce.output.fileoutputformat.compress.codec"), equalTo("org.apache.hadoop.io.compress.DefaultCodec"));
 
 		assertThat(crush.getMaxFileBlocks(), equalTo(100));
 
@@ -411,7 +411,7 @@ public class CrushOptionParsingTest {
 
 		JobConf job = crush.getJob();
 
-		assertThat(job.get("mapred.reduce.tasks"), equalTo("80"));
+		assertThat(job.get("mapreduce.job.reduces"), equalTo("80"));
 		assertThat(Long.parseLong(job.get("crush.timestamp")), greaterThanOrEqualTo(millis));
 		assertThat(job.get("crush.num.specs"), equalTo("1"));
 
@@ -435,7 +435,7 @@ public class CrushOptionParsingTest {
 
 		JobConf job = crush.getJob();
 
-		assertThat(job.get("mapred.reduce.tasks"), equalTo("80"));
+		assertThat(job.get("mapreduce.job.reduces"), equalTo("80"));
 		assertThat(Long.parseLong(job.get("crush.timestamp")), greaterThanOrEqualTo(millis));
 		assertThat(job.get("crush.num.specs"), equalTo("1"));
 
@@ -459,7 +459,7 @@ public class CrushOptionParsingTest {
 
 		JobConf job = crush.getJob();
 
-		assertThat(job.get("mapred.reduce.tasks"), equalTo("80"));
+		assertThat(job.get("mapreduce.job.reduces"), equalTo("80"));
 		assertThat(Long.parseLong(job.get("crush.timestamp")), greaterThanOrEqualTo(millis));
 		assertThat(job.get("crush.num.specs"), equalTo("1"));
 

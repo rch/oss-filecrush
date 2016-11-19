@@ -122,7 +122,7 @@ crushed_file-20100221175612-1-1 = medium-file2 + small-file7
 
 Notice how big-enough-file was moved to the output directory. The input directory contains only the files that were combined into the larger files.
 
-By default, the output file names end with two numbers. The first number is the task number of the reducer that wrote the file. The second number is the zero-based file count of that specific reducer. So a file ending with 0-0 was produced by reducer 0 and was the first file written by that reducer. A file ending 0-1 is the second file written by that reducer. A file ending 1-0 was produced by reducer 1 and was the first file written by that reducer. In the example, notice how the directory subdir was converted into two files. If mapred.reduce.tasks permits, multiple reducers can cooperate to crush a large directory.
+By default, the output file names end with two numbers. The first number is the task number of the reducer that wrote the file. The second number is the zero-based file count of that specific reducer. So a file ending with 0-0 was produced by reducer 0 and was the first file written by that reducer. A file ending 0-1 is the second file written by that reducer. A file ending 1-0 was produced by reducer 1 and was the first file written by that reducer. In the example, notice how the directory subdir was converted into two files. If mapreduce.job.reduces permits, multiple reducers can cooperate to crush a large directory.
 
 Now a clone example. Say we invoked the crush like this:
 

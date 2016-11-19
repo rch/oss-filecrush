@@ -125,11 +125,11 @@ public class CrushReducerParameterizedTest extends EasyMockSupport {
 		 * This logic tree around compression simulates what the output formats do.
 		 */
 		if (CompressionType.NONE == compressionType) {
-			job.setBoolean("mapred.output.compress", false);
+			job.setBoolean("mapreduce.output.fileoutputformat.compress", false);
 		} else {
-			job.setBoolean("mapred.output.compress", true);
-			job.set("mapred.output.compression.type", compressionType.name());
-			job.set("mapred.output.compression.codec", CustomCompressionCodec.class.getName());
+			job.setBoolean("mapreduce.output.fileoutputformat.compress", true);
+			job.set("mapreduce.output.fileoutputformat.compress.type", compressionType.name());
+			job.set("mapreduce.output.fileoutputformat.compress.codec", CustomCompressionCodec.class.getName());
 		}
 
 		outDir = tmp.newFolder("out");

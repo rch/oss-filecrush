@@ -17,12 +17,14 @@ package com.m6d.filecrush.crush;
 
 import static java.lang.String.format;
 
+import java.lang.Void;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -30,6 +32,9 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.ArrayWritable;
+import org.apache.hadoop.io.NullWritable;
+import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.FileInputFormat;
 import org.apache.hadoop.mapred.InputSplit;
@@ -43,6 +48,26 @@ import org.apache.hadoop.mapred.RecordWriter;
 import org.apache.hadoop.mapred.Reducer;
 import org.apache.hadoop.mapred.Reporter;
 import org.apache.hadoop.mapred.TextInputFormat;
+
+import org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat;
+
+//import org.apache.hadoop.hive.serde.serdeConstants;
+import org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat;
+import org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat;
+import org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe;
+import org.apache.hadoop.hive.serde2.io.ParquetHiveRecord;
+import org.apache.hadoop.hive.serde2.objectinspector.StructObjectInspector;
+import org.apache.hadoop.hive.ql.io.IOConstants;
+import org.apache.hadoop.hive.ql.exec.FileSinkOperator;
+import parquet.schema.MessageType;
+import parquet.hadoop.ParquetFileReader;
+import parquet.hadoop.metadata.ParquetMetadata;
+import parquet.column.ColumnDescriptor;
+
+import org.apache.avro.file.DataFileReader;
+import org.apache.avro.generic.GenericDatumReader;
+import org.apache.avro.mapred.FsInput;
+import org.apache.avro.file.SeekableInput;
 
 @SuppressWarnings("deprecation")
 public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, Text, Text> {
@@ -81,6 +106,13 @@ public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, T
 	 * Used with corresponding element in {@link #inputRegexList} to calculate the crush ouput file name.
 	 */
 	private List<String> outputReplacementList;
+
+	/**
+	 * Stores whether the input format is Text
+	 */
+	private String inputFormat;
+	private String outputFormat;;
+        private ParquetHiveSerDe parquetSerDe;
 
 	/**
 	 * Input formats that correspond with {@link #inputRegexList}.
@@ -211,9 +243,11 @@ public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, T
 				Class<?> inFormatCls;
 
 				if (value.equals(TextInputFormat.class.getName())) {
+					inputFormat = "text";
 					inFormatCls = KeyValuePreservingTextInputFormat.class;
 				} else {
-				 inFormatCls = Class.forName(value);
+					inputFormat = value;
+					inFormatCls = Class.forName(value);
 
 					if (!FileInputFormat.class.isAssignableFrom(inFormatCls)) {
 						throw new IllegalArgumentException(format("Not a file input format: %s=%s", key, value));
@@ -249,6 +283,26 @@ public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, T
 		}
 	}
 
+        private MessageType getParquetFileSchema(JobConf job, Path inputPath) throws IOException {
+		ParquetMetadata readFooter = ParquetFileReader.readFooter(job, inputPath);
+		return readFooter.getFileMetaData().getSchema();
+        }
+
+        private String getParquetFileSchemaString(JobConf job, Path inputPath) throws IOException {
+		MessageType schema = getParquetFileSchema(job, inputPath);
+		StringBuilder sc = new StringBuilder();
+		schema.writeToStringBuilder(sc, "  ");
+		return sc.toString();
+        }
+
+        private String getAvroFileSchemaString(JobConf job, Path inputPath) throws IOException {
+		SeekableInput input = new FsInput(inputPath, job);
+		DataFileReader<Void> avroReader = new DataFileReader<Void>(input, new GenericDatumReader<Void>());
+		String schemaString = avroReader.getSchema().toString();
+		avroReader.close();
+                return schemaString;
+        }
+
 	@Override
 	public void reduce(Text bucketId, Iterator<Text> values, OutputCollector<Text, Text> collector, Reporter reporter) throws IOException {
 		String bucket = bucketId.toString();
@@ -270,66 +324,146 @@ public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, T
 		 * Strip the leading slash to make the path relative. the output format will relativize it to the task attempt work dir.
 		 */
 		RecordWriter<Object, Object> sink = null;
+		FileSinkOperator.RecordWriter parquetSink = null;
 		Exception rootCause = null;
 
+		Void voidKey = null;
 		Object key = null;
 		Object value = null;
+
+                String schemaSignature = null;
+                String columns = null;
+                String columnsTypes = null;
+		Properties jobProperties = new Properties();
+		boolean firstFile = true;
 
 		try {
 			while (null == rootCause && values.hasNext()) {
 				Text srcFile = values.next();
 				Path inputPath = new Path(srcFile.toString());
-
 				RecordReader<Object, Object> reader = createRecordReader(idx, inputPath, reporter);
 
-				try {
-					if (null == key) {
-						key = reader.createKey();
-						value = reader.createValue();
+				if (firstFile) {
+					firstFile = false;
 
-						/*
-						 * Set the key and value class in the conf, which the output format uses to get type information.
-						 */
-						job.setOutputKeyClass(key.getClass());
-						job.setOutputValueClass(value.getClass());
+					key = reader.createKey();
+					if (null == key)
+						key = NullWritable.get();
+					value = reader.createValue();
 
-						/*
-						 * Output file name is absolute so we can just add it to the crush prefix.
-						 */
-						sink = createRecordWriter(idx, "crush" + outputFileName);
+					if (AvroContainerInputFormat.class.isAssignableFrom(getInputFormatClass(idx))) {
+						schemaSignature = getAvroFileSchemaString(job, inputPath);
+						job.set("avro.schema.literal", schemaSignature);
+                                        } else if (MapredParquetInputFormat.class.isAssignableFrom(getInputFormatClass(idx))) {
+						MessageType schema = getParquetFileSchema(job, inputPath);
+						schemaSignature = getParquetFileSchemaString(job, inputPath);
+						StringBuilder columnsSb = new StringBuilder();
+						StringBuilder columnsTypesSb = new StringBuilder();
+						boolean firstColumn = true;
+						for(ColumnDescriptor col : schema.getColumns()) {
+							if (firstColumn) {
+								firstColumn = false;
+							} else {
+								columnsSb.append(",");
+								columnsTypesSb.append(",");
+							}
+							columnsSb.append(col.getPath()[0]);
+							String typeName = col.getType().toString();
+							if ("INT96".equals(typeName))
+								typeName = "timestamp";
+							else if ("INT64".equals(typeName))
+								typeName = "bigint";
+							else if ("INT32".equals(typeName))
+								typeName = "int";
+							else if ("INT16".equals(typeName))
+								typeName = "smallint";
+							else if ("INT8".equals(typeName))
+								typeName = "tinyint";
+							else if ("BINARY".equals(typeName))
+								typeName = "string";
+							else if ("BOOLEAN".equals(typeName))
+								typeName = "boolean";
+							else if ("DOUBLE".equals(typeName))
+								typeName = "double";
+							else if ("FLOAT".equals(typeName))
+								typeName = "float";
+//							else if (typeName.startsWith("FIXED_LEN_BYTE_ARRAY")) {
+//								typeName = col.getType().getOriginalType();
+//							}
+							columnsTypesSb.append(typeName);
+						}
+						columns = columnsSb.toString();
+						columnsTypes = columnsTypesSb.toString();
+						jobProperties.put(IOConstants.COLUMNS, columns);
+						jobProperties.put(IOConstants.COLUMNS_TYPES, columnsTypes);
+						LOG.debug(format("COLUMNS:%s", columns));
+						LOG.debug(format("COLUMNS_TYPES:%s", columnsTypes));
+						parquetSerDe = new ParquetHiveSerDe();
+						parquetSerDe.initialize(job, jobProperties);
+                                        } else {
+						schemaSignature = key.getClass().getName() + ":" + value.getClass().getName();
+                                        }
+
+					/*
+					 * Set the key and value class in the conf, which the output format uses to get type information.
+					 */
+					job.setOutputKeyClass(key.getClass());
+					job.setOutputValueClass(value.getClass());
+
+					/*
+					 * Output file name is absolute so we can just add it to the crush prefix.
+					 */
+                                       	if (MapredParquetOutputFormat.class.isAssignableFrom(getOutputFormatClass(idx))) {
+						outputFormat = "parquet";
+						parquetSink = createParquetRecordWriter(idx, valueOut.toString(), jobProperties, (Class<? extends org.apache.hadoop.io.Writable>)value.getClass(), reporter);
 					} else {
-
-						Class<?> other = reader.createKey().getClass();
-
-						if (!(key.getClass().equals(other))) {
-							throw new IllegalArgumentException(format("Heterogeneous keys detected in %s: %s !- %s", inputPath, key.getClass(), other));
-						}
-
-						other = reader.createValue().getClass();
-
-						if (!value.getClass().equals(other)) {
-							throw new IllegalArgumentException(format("Heterogeneous values detected in %s: %s !- %s", inputPath, value.getClass(), other));
-						}
+						outputFormat = getOutputFormatClass(idx).getName();
+						sink = createRecordWriter(idx, valueOut.toString());
 					}
+				} else { // next files
 
-					while (reader.next(key, value)) {
-						sink.write(key, value);
-						reporter.incrCounter(ReducerCounter.RECORDS_CRUSHED, 1);
+					/*
+					 * Ensure schema signature is the same as the first file's
+					 */
+					String nextSchemaSignature = null;
+					if (AvroContainerInputFormat.class.isAssignableFrom(getInputFormatClass(idx))) {
+						nextSchemaSignature = getAvroFileSchemaString(job, inputPath);
+                                        } else if (MapredParquetInputFormat.class.isAssignableFrom(getInputFormatClass(idx))) {
+						nextSchemaSignature = getParquetFileSchemaString(job, inputPath);
+                                        } else {
+						Object otherKey = reader.createKey();
+						if (otherKey == null)
+							otherKey = NullWritable.get();
+						nextSchemaSignature = otherKey.getClass().getName() + ":" + reader.createValue().getClass().getName();
 					}
-				} catch (Exception e) {
-					rootCause = e;
-				} finally {
-					try {
-						reader.close();
-					} catch (Exception e) {
-						if (null == rootCause) {
-							rootCause = e;
-						} else {
-							LOG.debug("Swallowing exception on close of " + inputPath, e);
-						}
+					if (!schemaSignature.equals(nextSchemaSignature)) {
+						throw new IllegalArgumentException(format("Heterogeneous schema detected in file %s: [%s] != [%s]", inputPath, nextSchemaSignature, schemaSignature));
 					}
 				}
 
+				boolean ret;
+				if ("parquet".equals(outputFormat))
+					ret = reader.next(voidKey, value);
+				else
+					ret = reader.next(key, value);
+				while (ret) {
+					if ("text".equals(inputFormat))
+						sink.write(key, null);
+					else
+						if (sink != null)
+							sink.write(key, value);
+						else {
+							ParquetHiveRecord parquetHiveRecord = new ParquetHiveRecord(value, (StructObjectInspector)parquetSerDe.getObjectInspector());
+							parquetSink.write(parquetHiveRecord);
+						}
+					reporter.incrCounter(ReducerCounter.RECORDS_CRUSHED, 1);
+
+					if ("parquet".equals(outputFormat))
+						ret = reader.next(voidKey, value);
+					else
+						ret = reader.next(key, value);
+				}
+//
 				/*
 				 * Output of the reducer is the source file => crushed file (in the final output dir, no the task attempt work dir.
 				 */
@@ -358,6 +492,17 @@ public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, T
 					}
 				}
 			}
+			if (null != parquetSink) {
+				try {
+					parquetSink.close(false);
+				} catch (Exception e) {
+					if (null == rootCause) {
+						rootCause = e;
+					} else {
+						LOG.error("Swallowing exception on close of " + outputFileName, e);
+					}
+				}
+			}
 
 			/*
 			 * Let the exception bubble up with a minimum of wrapping.
@@ -376,17 +521,39 @@ public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, T
 		}
 	}
 
+        Class<? extends FileInputFormat<?, ?>> getInputFormatClass(int idx) {
+                return (Class<? extends FileInputFormat<?, ?>>) inFormatClsList.get(idx);
+        }
+
+        Class<? extends OutputFormat<?, ?>> getOutputFormatClass(int idx) {
+                return (Class<? extends OutputFormat<?, ?>>) outFormatClsList.get(idx);
+        }
+
 	/**
 	 * Returns a record writer that creates files in the task attempt work directory. Path must be relative!
 	 */
 	@SuppressWarnings("unchecked")
 	private RecordWriter<Object, Object> createRecordWriter(int idx, String path) throws IOException {
-		Class<? extends OutputFormat<?, ?>> cls = (Class<? extends OutputFormat<?, ?>>) outFormatClsList.get(idx);
+		Class<? extends OutputFormat<?, ?>> cls = (Class<? extends OutputFormat<?, ?>>) getOutputFormatClass(idx);
 
 		try {
 			OutputFormat<Object, Object> format = (OutputFormat<Object, Object>) cls.newInstance();
-
 			return format.getRecordWriter(fs, job, path, null);
+		} catch (RuntimeException e) {
+			throw e;
+		} catch (IOException e) {
+			throw e;
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		}
+	}
+
+	private FileSinkOperator.RecordWriter createParquetRecordWriter(int idx, String path, Properties properties, Class<? extends org.apache.hadoop.io.Writable> valueClass, Reporter reporter) throws IOException {
+		Class<? extends OutputFormat<?, ?>> cls = (Class<? extends OutputFormat<?, ?>>) getOutputFormatClass(idx);
+
+		try {
+			MapredParquetOutputFormat format = (MapredParquetOutputFormat) cls.newInstance();
+                       	return format.getHiveRecordWriter(job, new Path(path), valueClass, false /* isCompressed */, properties, reporter);
 		} catch (RuntimeException e) {
 			throw e;
 		} catch (IOException e) {
@@ -401,7 +568,7 @@ public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, T
 
 		LOG.info(format("Opening '%s'", inputPath));
 
-		Class<? extends FileInputFormat<?, ?>> cls = (Class<? extends FileInputFormat<?, ?>>) inFormatClsList.get(idx);
+		Class<? extends FileInputFormat<?, ?>> cls = getInputFormatClass(idx);
 
 		try {
 			FileInputFormat.setInputPaths(job, inputPath);

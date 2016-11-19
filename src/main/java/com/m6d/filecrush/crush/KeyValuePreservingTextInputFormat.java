@@ -104,6 +104,9 @@ public class KeyValuePreservingTextInputFormat extends FileInputFormat<Text, Tex
 		public boolean next(Text key, Text value) throws IOException {
 			boolean next = delegate.next(delKey, delValue);
 
+		key.set(delValue);
+		value.clear();
+/*
 			if (next) {
 				int first = delValue.find("\t");
 
@@ -119,7 +122,7 @@ public class KeyValuePreservingTextInputFormat extends FileInputFormat<Text, Tex
 					key.set(delValue);
 				}
 			}
-
+*/
 			return next;
 		}
   }

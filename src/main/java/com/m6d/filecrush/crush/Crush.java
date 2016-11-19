@@ -23,6 +23,7 @@ import static java.util.Collections.emptyList;
 
 import java.io.BufferedReader;
 import java.io.DataOutputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
@@ -30,10 +31,12 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.text.NumberFormat;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.GnuParser;
@@ -55,6 +58,7 @@ import org.apache.hadoop.io.SequenceFile.CompressionType;
 import org.apache.hadoop.io.SequenceFile.Reader;
 import org.apache.hadoop.io.SequenceFile.Writer;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.io.compress.BZip2Codec;
 import org.apache.hadoop.io.compress.CompressionCodec;
 import org.apache.hadoop.io.compress.DefaultCodec;
 import org.apache.hadoop.io.compress.GzipCodec;
@@ -74,21 +78,25 @@ import org.apache.hadoop.mapred.lib.IdentityMapper;
 import org.apache.hadoop.mapred.lib.MultipleInputs;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
+import org.apache.hadoop.io.compress.SnappyCodec;
+import org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat;
+import org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat;
+import org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat;
+import org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat;
 
 import com.m6d.filecrush.crush.Bucketer.Bucket;
 
-
 @SuppressWarnings("deprecation")
 public class Crush extends Configured implements Tool {
-  /**
-   * Removes the scheme and authority from the path. The path is group 5.
-   */
+	/**
+	 * Removes the scheme and authority from the path. The path is group 5.
+	 */
 	private final Matcher pathMatcher = Pattern.compile("([a-z]+:(//[a-z0-9A-Z-]+(\\.[a-z0-9A-Z-]+)*(:[0-9]+)?)?)?(.+)").matcher("dummy");
 
-  /**
-   * The directory within which we find data to crush.
-   */
-  private Path srcDir;
+	/**
+	 * The directory within which we find data to crush.
+	 */
+	private Path srcDir;
 
 	/**
 	 * The directory that will store the output of the crush. In normal mode, this is persistent after the job ends. In clone-mode,
@@ -157,7 +165,22 @@ public class Crush extends Configured implements Tool {
 	/**
 	 * Regex from the --ignore-regex option used for filtering out files for crushing.  
 	 */
-	private Matcher ignoredFiles;
+	private Matcher ignoredFilesMatcher;
+
+	/**
+	 * Regex from the --skip-regex option used for skipping files for crushing.  
+	 */
+	private Matcher skippedFilesMatcher;
+
+	/**
+	 * Flag to indicate if empty files should be removed (--remove-empty-files option)
+	 */
+	private boolean removeEmptyFiles;
+
+	/**
+	 * The maximum number of reducer tasks
+	 */
+	private int maxTasks = 100;
 
 	/**
 	 * The counters from the completed job.
@@ -174,6 +197,11 @@ public class Crush extends Configured implements Tool {
 	 * Absolute paths to the skipped files. Path only. No scheme or authority.
 	 */
 	private Set<String> skippedFiles;
+
+	/**
+	 * Absolute paths to the files to be removed. Path only. No scheme or authority.
+	 */
+	private Set<String> removableFiles;
 
 	/**
 	 * The number of crush output files.
@@ -199,7 +227,6 @@ public class Crush extends Configured implements Tool {
 				.withDescription("Print this help message")
 				.withLongOpt("help")
 				.create("?");
-
 		options.addOption(option);
 
 		option = OptionBuilder
@@ -208,16 +235,29 @@ public class Crush extends Configured implements Tool {
 				.withDescription("Regular expression that matches a directory name. Used to match a directory with a correponding replacement string")
 				.withLongOpt("regex")
 				.create();
-
 		options.addOption(option);
 
 		option = OptionBuilder
 				.hasArg()
 				.withArgName("ignore file regex")
-				.withDescription("Regular expression to apply for filtering out crush candidate files.  Any files in the input crush directory matching this will be ignored")
+				.withDescription("Regular expression to apply for filtering out crush candidate files. Any files in the input crush directory matching this will be ignored")
 				.withLongOpt("ignore-regex")
 				.create();
+		options.addOption(option);
 
+		option = OptionBuilder
+				.hasArg()
+				.withArgName("skip file regex")
+				.withDescription("Regular expression to apply for skipping crush candidate files. Any files in the input crush directory matching this will not be considered for crushing")
+				.withLongOpt("skip-regex")
+				.create();
+		options.addOption(option);
+
+		option = OptionBuilder
+				.withArgName("remove empty files")
+				.withDescription("Remove empty files")
+				.withLongOpt("remove-empty-files")
+				.create();
 		options.addOption(option);
 
 		option = OptionBuilder
@@ -226,7 +266,6 @@ public class Crush extends Configured implements Tool {
 				.withDescription("Replacement string used with the corresponding regex to calculate the name of a directory's crush output file")
 				.withLongOpt("replacement")
 				.create();
-
 		options.addOption(option);
 
 		option = OptionBuilder
@@ -235,7 +274,6 @@ public class Crush extends Configured implements Tool {
 				.withDescription("Input format used to open the files of directories matching the corresponding regex")
 				.withLongOpt("input-format")
 				.create();
-
 		options.addOption(option);
 
 		option = OptionBuilder
@@ -244,7 +282,6 @@ public class Crush extends Configured implements Tool {
 				.withDescription("Output format used to open the files of directories matching the corresponding regex")
 				.withLongOpt("output-format")
 				.create();
-
 		options.addOption(option);
 
 		option = OptionBuilder
@@ -253,7 +290,6 @@ public class Crush extends Configured implements Tool {
 				.withDescription("Threshold relative to the dfs block size over which a file becomes eligible for crushing. Must be in the range (0 and 1]. Default 0.75")
 				.withLongOpt("threshold")
 				.create();
-
 		options.addOption(option);
 
 		option = OptionBuilder
@@ -262,14 +298,12 @@ public class Crush extends Configured implements Tool {
 				.withDescription("The maximum number of dfs blocks per output file. Input files are grouped into output files under the assumption that the input and output compression codecs have comparable efficiency. Default is 8.")
 				.withLongOpt("max-file-blocks")
 				.create();
-
 		options.addOption(option);
 
 		option = OptionBuilder
 				.withDescription("Do not skip directories containing single files.")
 				.withLongOpt("include-single-file-dirs")
 				.create();
-
 		options.addOption(option);
 
 		option = OptionBuilder
@@ -278,28 +312,38 @@ public class Crush extends Configured implements Tool {
 				.withDescription("FQN of the compression codec to use or \"none\". Defaults to DefaultCodec.")
 				.withLongOpt("compress")
 				.create();
-
 		options.addOption(option);
 
 		option = OptionBuilder
 				.withDescription("Operate in clone mode.")
 				.withLongOpt("clone")
 				.create();
+		options.addOption(option);
 
+		option = OptionBuilder
+				.hasArg()
+				.withDescription("Maximum number of reducer tasks.")
+				.withLongOpt("max-tasks")
+				.create();
+		options.addOption(option);
+
+		option = OptionBuilder
+				.hasArg()
+				.withDescription("MapReduce job name.")
+				.withLongOpt("job-name")
+				.create();
 		options.addOption(option);
 
 		option = OptionBuilder
 				.withDescription("Info logging to console.")
 				.withLongOpt("info")
 				.create();
-
 		options.addOption(option);
 
 		option = OptionBuilder
 				.withDescription("Verbose logging to console.")
 				.withLongOpt("verbose")
 				.create();
-
 		options.addOption(option);
 
 		return options;
@@ -360,8 +404,22 @@ public class Crush extends Configured implements Tool {
 		}
 		
 		if (cli.hasOption("ignore-regex")) {
-      ignoredFiles = Pattern.compile(cli.getOptionValue("ignore-regex")).matcher("");
+			ignoredFilesMatcher = Pattern.compile(cli.getOptionValue("ignore-regex")).matcher("");
 		}
+
+		if (cli.hasOption("skip-regex")) {
+			skippedFilesMatcher = Pattern.compile(cli.getOptionValue("skip-regex")).matcher("");
+		}
+
+		if (cli.hasOption("max-tasks")) {
+			maxTasks = Integer.parseInt(cli.getOptionValue("max-tasks"));
+		}
+
+		if (cli.hasOption("job-name")) {
+			job.set("mapreduce.job.name", cli.getOptionValue("job-name"));
+		}
+
+		removeEmptyFiles = cli.hasOption("remove-empty-files");
 
 		excludeSingleFileDirs = !cli.hasOption("include-single-file-dirs");
 
@@ -405,7 +463,7 @@ public class Crush extends Configured implements Tool {
 					throw new IllegalArgumentException("Tasks must be in the range [1, 4000]: " + maxTasks);
 				}
 
-				job.setInt("mapred.reduce.tasks", maxTasks);
+				job.setInt("mapreduce.job.reduces", maxTasks);
 
 				maxFileBlocks = Integer.MAX_VALUE;
 
@@ -490,6 +548,7 @@ public class Crush extends Configured implements Tool {
 
 			dfsBlockSize = parseDfsBlockSize(job);
 			maxEligibleSize = (long) (dfsBlockSize * threshold);
+			print(Verbosity.INFO, format("\nSmall file threshold: " + NumberFormat.getNumberInstance(Locale.US).format(maxEligibleSize) + " bytes\n"));
 		}
 
 		/*
@@ -497,8 +556,12 @@ public class Crush extends Configured implements Tool {
 		 */
 		job.set("crush.timestamp", crushTimestamp);
 		
-		if (ignoredFiles != null) {
-			job.set("crush.ignore-regex", ignoredFiles.pattern().pattern());
+		if (ignoredFilesMatcher != null) {
+			job.set("crush.ignore-regex", ignoredFilesMatcher.pattern().pattern());
+		}
+
+		if (skippedFilesMatcher != null) {
+			job.set("crush.skip-regex", skippedFilesMatcher.pattern().pattern());
 		}
 
 		if (regexes.size() != replacements.size() || replacements.size() != inFormats.size() || inFormats.size() != outFormats.size()) {
@@ -522,6 +585,10 @@ public class Crush extends Configured implements Tool {
 				inFmt = SequenceFileInputFormat.class.getName();
 			} else if ("text".equals(inFmt)) {
 				inFmt = TextInputFormat.class.getName();
+			} else if ("avro".equals(inFmt)) {
+				inFmt = AvroContainerInputFormat.class.getName();
+                        } else if ("parquet".equals(inFmt)) {
+                                inFmt = MapredParquetInputFormat.class.getName();
 			} else {
 				try {
 					if (!FileInputFormat.class.isAssignableFrom(Class.forName(inFmt))) {
@@ -540,6 +607,10 @@ public class Crush extends Configured implements Tool {
 				outFmt = SequenceFileOutputFormat.class.getName();
 			} else if ("text".equals(outFmt)) {
 				outFmt = TextOutputFormat.class.getName();
+			} else if ("avro".equals(outFmt)) {
+				outFmt = AvroContainerOutputFormat.class.getName();
+                        } else if ("parquet".equals(outFmt)) {
+                                outFmt = MapredParquetOutputFormat.class.getName();
 			} else {
 				try {
 					if (!FileOutputFormat.class.isAssignableFrom(Class.forName(outFmt))) {
@@ -554,14 +625,20 @@ public class Crush extends Configured implements Tool {
 		}
 
 		String codec = cli.getOptionValue("compress");
+		String codecClassName = null;
 
-		if (null == codec) {
-			codec = DefaultCodec.class.getName();
+		if (null == codec || "deflate".equals(codec)) {
+			codecClassName = DefaultCodec.class.getName();
 		} else if ("none".equals(codec)) {
-			codec = null;
+			codecClassName = null;
 		} else if ("gzip".equals(codec)) {
-			codec = GzipCodec.class.getName();
+			codecClassName = GzipCodec.class.getName();
+		} else if ("snappy".equals(codec)) {
+			codecClassName = SnappyCodec.class.getName();
+		} else if ("bzip2".equals(codec)) {
+			codecClassName = BZip2Codec.class.getName();
 		} else {
+			codecClassName = codec;
 			try {
 				if (!CompressionCodec.class.isAssignableFrom(Class.forName(codec))) {
 					throw new IllegalArgumentException("Not a CompressionCodec: " + codec);
@@ -571,15 +648,19 @@ public class Crush extends Configured implements Tool {
 			}
 		}
 
-		if (null == codec) {
-			job.setBoolean("mapred.output.compress", false);
+		if (null == codecClassName) {
+			job.setBoolean("mapreduce.output.fileoutputformat.compress", false);
+			job.set("avro.output.codec", "null");
+			job.set("parquet.compression", "uncompressed");
 		} else {
-			job.setBoolean("mapred.output.compress", true);
-			job.set("mapred.output.compression.type", "BLOCK");
-			job.set("mapred.output.compression.codec", codec);
+			job.setBoolean("mapreduce.output.fileoutputformat.compress", true);
+			job.set("mapreduce.output.fileoutputformat.compress.type", "BLOCK");
+			job.set("mapreduce.output.fileoutputformat.compress.codec", codecClassName);
+			job.set("avro.output.codec", codec);
+			job.set("parquet.compression", codec);
 
 			try {
-				CompressionCodec instance = (CompressionCodec) Class.forName(codec).newInstance();
+				CompressionCodec instance = (CompressionCodec) Class.forName(codecClassName).newInstance();
 				codecExtension = instance.getDefaultExtension();
 			} catch (Exception e) {
 				throw new AssertionError();
@@ -595,17 +676,17 @@ public class Crush extends Configured implements Tool {
 	 * @return a long representing block size
 	 * @throws RuntimeException if can not determine block size
 	 */
-  private long parseDfsBlockSize(JobConf job){
-    long old = job.getLong("dfs.block.size", -1);
-    if (old == -1){
-      old = job.getLong("dfs.blocksize", -1);
-    }
-    if (old == -1){
-      throw new RuntimeException ( "Could not determine how to set block size. Abandon ship!");
-    }
-    return old;
-  }
-  
+	private long parseDfsBlockSize(JobConf job){
+		long old = job.getLong("dfs.blocksize", -1);
+		if (old == -1){
+			old = job.getLong("dfs.block.size", -1);
+		}
+		if (old == -1){
+			throw new RuntimeException ( "Could not determine how to set block size. Abandon ship!");
+		}
+		return old;
+	}
+
 	@Override
 	public int run(String[] args) throws Exception {
 
@@ -693,11 +774,11 @@ public class Crush extends Configured implements Tool {
 
 		for (FileStatus content : contents) {
 			if (!content.isDir()) {
-				if (ignoredFiles != null) {
+				if (ignoredFilesMatcher != null) {
 					// Check for files to skip
-					ignoredFiles.reset(content.getPath().toUri().getPath());
-					if (ignoredFiles.matches()) {
-						LOG.trace("Ignoring " + content.getPath().toString());
+					ignoredFilesMatcher.reset(content.getPath().toUri().getPath());
+					if (ignoredFilesMatcher.matches()) {
+						LOG.info("Ignoring " + content.getPath().toString());
 						continue;
 					}
 				}
@@ -756,8 +837,8 @@ public class Crush extends Configured implements Tool {
 		 */
 		List<Path> crushInput = emptyList();
 
-		Text srcFile			= new Text();
-		Text crushOut			= new Text();
+		Text srcFile		= new Text();
+		Text crushOut		= new Text();
 		Text prevCrushOut	= new Text();
 
 		for (FileStatus partFile : listStatus) {
@@ -786,24 +867,45 @@ public class Crush extends Configured implements Tool {
 
 			swap(crushInput, prevCrushOut.toString());
 		}
+
+		/*
+		 * Don't forget to move the files that were not crushed to the output dir so that the output dir has all the data that was in
+		 * the input dir, the difference being there are fewer files in the output dir.
+		 */
+		if (removableFiles.size() > 0) {
+			String srcDirName = fs.makeQualified(srcDir).toUri().getPath();
+			String destName = fs.makeQualified(dest).toUri().getPath();
+			print(Verbosity.INFO, "\n\nMoving removed files to " + destName);
+			for (String name : removableFiles) {
+				Path srcPath = new Path(name);
+				Path destPath = new Path(destName + name).getParent();
+	
+				print(Verbosity.INFO, "\n  Moving " + srcPath + " to " + destPath);
+				rename(srcPath, destPath, null);
+			}
+		}
 	}
 
 	/**
 	 * Returns the output from {@link CrushReducer}. Each reducer writes out a mapping of source files to crush output file.
 	 */
 	private List<FileStatus> getOutputMappings() throws IOException {
-		FileStatus[] files = fs.listStatus(outDir, new PathFilter() {
-			Matcher matcher = Pattern.compile("part-\\d+").matcher("dummy");
+		try {
+			FileStatus[] files = fs.listStatus(outDir, new PathFilter() {
+				Matcher matcher = Pattern.compile("part-\\d+").matcher("dummy");
 
-			@Override
-			public boolean accept(Path path) {
-				matcher.reset(path.getName());
+				@Override
+				public boolean accept(Path path) {
+					matcher.reset(path.getName());
+	
+					return matcher.matches();
+				}
+			});
 
-				return matcher.matches();
-			}
-		});
-
-		return asList(files);
+			return asList(files);
+		} catch (FileNotFoundException e) {
+			return new LinkedList<FileStatus>();
+		}
 	}
 
 	/**
@@ -860,31 +962,32 @@ public class Crush extends Configured implements Tool {
 		 * /user/me/output/dir2/crushed_file ...
 		 * /user/me/output/dir2/dir3/dir4/crushed_file ...
 		 */
-		String srcDirName			= fs.makeQualified(srcDir).toUri().getPath();
-
-		String destName				= fs.makeQualified(dest).toUri().getPath();
+		String srcDirName	= fs.makeQualified(srcDir).toUri().getPath();
+		String destName		= fs.makeQualified(dest).toUri().getPath();
 		String partToReplace	= fs.makeQualified(outDir).toUri().getPath() + "/crush" + srcDirName;
-
-		print(Verbosity.INFO, "\n\nCopying crush files to " + destName);
 
 		for (String crushOutputFile : crushOutputFiles) {
 			Path srcPath  = new Path(crushOutputFile);
 			Path destPath = new Path(destName + crushOutputFile.substring(partToReplace.length())).getParent();
 
+			print(Verbosity.INFO, "\n  Renaming " + srcPath + " to " + destPath);
 			rename(srcPath, destPath, null);
 		}
-
-		print(Verbosity.INFO, "\n\nMoving skipped files to " + destName);
 
 		/*
 		 * Don't forget to move the files that were not crushed to the output dir so that the output dir has all the data that was in
 		 * the input dir, the difference being there are fewer files in the output dir.
 		 */
-		for (String name : skippedFiles) {
-			Path srcPath = new Path(name);
-			Path destPath = new Path(destName + name.substring(srcDirName.length())).getParent();
+		if (skippedFiles.size() > 0) {
+			print(Verbosity.INFO, "\n\nMoving skipped files to " + destName);
 
-			rename(srcPath, destPath, null);
+			for (String name : skippedFiles) {
+				Path srcPath = new Path(name);
+				Path destPath = new Path(destName + name.substring(srcDirName.length())).getParent();
+
+				print(Verbosity.INFO, "\n  Renaming " + srcPath + " to " + destPath);
+				rename(srcPath, destPath, null);
+			}
 		}
 	}
 
@@ -997,23 +1100,22 @@ public class Crush extends Configured implements Tool {
 		}
 
 		fs.rename(src, dest);
-
-		print(Verbosity.VERBOSE, format("\n  %s => %s", src, dest));
 	}
 
 	void writeDirs() throws IOException {
 
-		print(Verbosity.INFO, "\n\nUsing temporary directory " + tmpDir.toUri().getPath());
+		print(Verbosity.INFO, "\nUsing temporary directory " + tmpDir.toUri().getPath() + "\n");
 
 		FileStatus status = fs.getFileStatus(srcDir);
 
 		Path tmpIn = new Path(tmpDir, "in");
 
-		bucketFiles			= new Path(tmpIn, "dirs");
-		partitionMap	= new Path(tmpIn, "partition-map");
-		counters			= new Path(tmpIn, "counters");
+		bucketFiles = new Path(tmpIn, "dirs");
+		partitionMap = new Path(tmpIn, "partition-map");
+		counters = new Path(tmpIn, "counters");
 
 		skippedFiles = new HashSet<String>();
+		removableFiles = new HashSet<String>();
 
 		/*
 		 * Prefer the path returned by the status because it is always fully qualified.
@@ -1023,36 +1125,40 @@ public class Crush extends Configured implements Tool {
 		Text key = new Text();
 		Text value = new Text();
 
-		Writer writer = SequenceFile.createWriter(fs, job, bucketFiles, Text.class, Text.class, CompressionType.BLOCK);
-
-		int numPartitions = Integer.parseInt(job.get("mapred.reduce.tasks"));
-
-		Bucketer partitionBucketer = new Bucketer(numPartitions, 0, false);
+		Bucketer partitionBucketer = new Bucketer(maxTasks, 0, false);
 		partitionBucketer.reset("partition-map");
 
 		jobCounters = new Counters();
+                int fileCount = 0;
+
+		//Path bucketFile = new Path(tmpIn, "dirs_" + fileCount++);
+		Writer writer = SequenceFile.createWriter(fs, job, bucketFiles, Text.class, Text.class, CompressionType.BLOCK);
 
 		try {
 			while (!dirs.isEmpty()) {
 				List<Path> nextLevel = new LinkedList<Path>();
 
 				for (Path dir : dirs) {
-					jobCounters.incrCounter(MapperCounter.DIRS_FOUND, 1);
+					String dirPath = dir.toUri().getPath();
+					print(Verbosity.INFO, "\n\n[" + dirPath + "]");
 
-					print(Verbosity.INFO, "\n\n" + dir.toUri().getPath());
+					jobCounters.incrCounter(MapperCounter.DIRS_FOUND, 1);
 
 					FileStatus[] contents = fs.listStatus(dir, new PathFilter() {
 						@Override
 						public boolean accept(Path testPath) {
-							if (ignoredFiles == null) return true;
-							ignoredFiles.reset(testPath.toUri().getPath());
-							return !ignoredFiles.matches();
+							if (ignoredFilesMatcher == null) return true;
+							ignoredFilesMatcher.reset(testPath.toUri().getPath());
+							boolean ignores = ignoredFilesMatcher.matches();
+							if (ignores)
+								LOG.info("Ignoring file " + testPath);
+							return !ignores;
 						}
 						
 					});
 
 					if (contents == null || contents.length == 0) {
-						print(Verbosity.INFO, " is empty");
+						print(Verbosity.INFO, "\n  Directory is empty");
 
 						jobCounters.incrCounter(MapperCounter.DIRS_SKIPPED, 1);
 					} else {
@@ -1070,15 +1176,26 @@ public class Crush extends Configured implements Tool {
 							if (content.isDir()) {
 								nextLevel.add(path);
 							} else {
-								boolean changed = uncrushedFiles.add(path.toUri().getPath());
+								String filePath = path.toUri().getPath();
+								boolean skipFile = false;
+								if (skippedFilesMatcher != null) {
+									skippedFilesMatcher.reset(filePath);
+									if (skippedFilesMatcher.matches()) {
+										skipFile = true;
+									}
+								}
 
+								boolean changed = uncrushedFiles.add(filePath);
 								assert changed : path.toUri().getPath();
-
 								long fileLength = content.getLen();
 
-								if (fileLength <= maxEligibleSize) {
-									crushables.add(content);
-									crushableBytes += fileLength;
+								if (!skipFile && fileLength <= maxEligibleSize) {
+									if (removeEmptyFiles && fileLength == 0)
+										removableFiles.add(filePath);
+									else {
+										crushables.add(content);
+										crushableBytes += fileLength;
+									}
 								}
 							}
 						}
@@ -1087,33 +1204,32 @@ public class Crush extends Configured implements Tool {
 						 * We found a directory with data in it. Make sure we know how to name the crush output file and then increment the
 						 * number of files we found.
 						 */
-		    		if (!uncrushedFiles.isEmpty()) {
-		    			if (-1 == findMatcher(dir)) {
-		    				throw new IllegalArgumentException("Could not find matching regex for directory: " + dir);
-		    			}
+						if (!uncrushedFiles.isEmpty()) {
+							if (-1 == findMatcher(dir)) {
+								throw new IllegalArgumentException("Could not find matching regex for directory: " + dir);
+							}
 
-		    			jobCounters.incrCounter(MapperCounter.FILES_FOUND, uncrushedFiles.size());
-		    		}
+							jobCounters.incrCounter(MapperCounter.FILES_FOUND, uncrushedFiles.size());
+						}
 
-		    		if (0 == crushableBytes) {
-		    			print(Verbosity.INFO, " has no crushable files");
+						if (0 == crushableBytes) {
+							print(Verbosity.INFO, "\n  Directory has no crushable files");
 
-		    			jobCounters.incrCounter(MapperCounter.DIRS_SKIPPED, 1);
-		    		} else {
-		    			/*
-		    			 * We found files to consider for crushing.
-		    			 */
-			    		long nBlocks = crushableBytes / dfsBlockSize;
+							jobCounters.incrCounter(MapperCounter.DIRS_SKIPPED, 1);
+						} else {
+							/*
+							 * We found files to consider for crushing.
+							 */
+							long nBlocks = crushableBytes / dfsBlockSize;
 
-			    		if (nBlocks * dfsBlockSize != crushableBytes) {
-			    			nBlocks++;
-			    		}
+							if (nBlocks * dfsBlockSize != crushableBytes) {
+								nBlocks++;
+							}
 
-			    		/*
-			    		 * maxFileBlocks will be huge in v1 mode, which will lead to one bucket per directory.
-			    		 */
+							/*
+							 * maxFileBlocks will be huge in v1 mode, which will lead to one bucket per directory.
+							 */
 							long dirBuckets = nBlocks / maxFileBlocks;
-
 							if (dirBuckets * maxFileBlocks != nBlocks) {
 								dirBuckets++;
 							}
@@ -1122,49 +1238,47 @@ public class Crush extends Configured implements Tool {
 								throw new AssertionError("Too many buckets: " + dirBuckets);
 							}
 
-			    		Bucketer directoryBucketer = new Bucketer((int) dirBuckets, excludeSingleFileDirs);
+							Bucketer directoryBucketer = new Bucketer((int) dirBuckets, excludeSingleFileDirs);
+							directoryBucketer.reset(getPathPart(dir));
 
-			    		directoryBucketer.reset(getPathPart(dir));
-
-			    		for (FileStatus file : crushables) {
+							for (FileStatus file : crushables) {
 								directoryBucketer.add(new FileStatusHasSize(file));
 							}
 
-			    		List<Bucket> crushFiles = directoryBucketer.createBuckets();
+							List<Bucket> crushFiles = directoryBucketer.createBuckets();
+							if (crushFiles.isEmpty()) {
+								jobCounters.incrCounter(MapperCounter.DIRS_SKIPPED, 1);
+								print(Verbosity.INFO, "\n  Directory skipped");
+							} else {
+								nBuckets += crushFiles.size();
+								jobCounters.incrCounter(MapperCounter.DIRS_ELIGIBLE, 1);
+								print(Verbosity.INFO, "\n  Generating " + crushFiles.size() + " output files");
 
-			    		if (crushFiles.isEmpty()) {
-			    			jobCounters.incrCounter(MapperCounter.DIRS_SKIPPED, 1);
-			    		} else {
-			    			nBuckets += crushFiles.size();
+								/*
+								 * Write out the mapping between a bucket and a file.
+								 */
+								for (Bucket crushFile : crushFiles) {
+									String bucketId = crushFile.name();
 
-			    			jobCounters.incrCounter(MapperCounter.DIRS_ELIGIBLE, 1);
+									List<String> filesInBucket = crushFile.contents();
 
-			    			print(Verbosity.INFO, " => " + crushFiles.size() + " output files");
+									print(Verbosity.INFO, format("\n  Output %s will include %,d input bytes from %,d files", bucketId,
+										crushFile.size(), filesInBucket.size()));
 
-			    			/*
-			    			 * Write out the mapping between a bucket and a file.
-			    			 */
-				    		for (Bucket crushFile : crushFiles) {
-				    			String bucketId = crushFile.name();
+									key.set(bucketId);
 
-				    			List<String> bucketFiles = crushFile.contents();
+									for (String f : filesInBucket) {
+										boolean changed = uncrushedFiles.remove(f);
+										assert changed : f;
 
-				    			print(Verbosity.INFO, format("\n  Output %s will include %,d input bytes from %,d files", bucketId,
-				    					crushFile.size(), bucketFiles.size()));
+										pathMatcher.reset(f);
+										pathMatcher.matches();
 
-				    			key.set(bucketId);
+										value.set(pathMatcher.group(5));
 
-				    			for (String f : bucketFiles) {
-				    				boolean changed = uncrushedFiles.remove(f);
-
-				    				assert changed : f;
-
-				    				pathMatcher.reset(f);
-
-				    				pathMatcher.matches();
-
-				    				value.set(pathMatcher.group(5));
-
+										/*
+										 * Write one row per file to maximize the number of mappers
+										 */
 										writer.append(key, value);
 
 										/*
@@ -1173,35 +1287,42 @@ public class Crush extends Configured implements Tool {
 										print(Verbosity.VERBOSE, "\n    " + f);
 									}
 
-				    			jobCounters.incrCounter(MapperCounter.FILES_ELIGIBLE, bucketFiles.size());
+									jobCounters.incrCounter(MapperCounter.FILES_ELIGIBLE, filesInBucket.size());
 
-				    			partitionBucketer.add(crushFile);
-				    		}
-			    		}
-		    		}
+									partitionBucketer.add(crushFile);
+								}
+							}
+						}
 
-		    		if (!uncrushedFiles.isEmpty()) {
-		    			print(Verbosity.INFO, "\n\n  Skipped " + uncrushedFiles.size() + " files");
+						if (!removableFiles.isEmpty()) {
+							print(Verbosity.INFO, "\n  Marked " + removableFiles.size() + " files for removal");
 
-		    			for (String uncrushed : uncrushedFiles) {
-		    				print(Verbosity.VERBOSE, "\n    " + uncrushed);
+							for (String removable : removableFiles) {
+								uncrushedFiles.remove(removable);
+								print(Verbosity.VERBOSE, "\n    " + removable);
 							}
 
-		    			jobCounters.incrCounter(MapperCounter.FILES_SKIPPED, uncrushedFiles.size());
-		    		}
+							jobCounters.incrCounter(MapperCounter.FILES_REMOVED, removableFiles.size());
+						}
 
-		    		skippedFiles.addAll(uncrushedFiles);
+						if (!uncrushedFiles.isEmpty()) {
+							print(Verbosity.INFO, "\n  Skipped " + uncrushedFiles.size() + " files");
+
+							for (String uncrushed : uncrushedFiles) {
+								print(Verbosity.VERBOSE, "\n    " + uncrushed);
+							}
+
+							jobCounters.incrCounter(MapperCounter.FILES_SKIPPED, uncrushedFiles.size());
+						}
+
+						skippedFiles.addAll(uncrushedFiles);
 					}
 				}
 
 				dirs = nextLevel;
 			}
 		} finally {
-			try {
-				writer.close();
-			} catch (Exception e) {
-				LOG.error("Trapped exception during close: " + bucketFiles, e);
-			}
+			writer.close();
 		}
 
 
@@ -1209,44 +1330,33 @@ public class Crush extends Configured implements Tool {
 		 * Now that we have processed all the directories, write the partition map.
 		 */
 		List<Bucket> partitions = partitionBucketer.createBuckets();
-
-		assert partitions.size() <= numPartitions;
+		assert partitions.size() <= maxTasks;
 
 		writer = SequenceFile.createWriter(fs, job, partitionMap, Text.class, IntWritable.class);
-
 		IntWritable partNum = new IntWritable();
+                int totalReducers = 0;
+		for (Bucket partition : partitions) {
+			String partitionName = partition.name();
 
-		try {
-			for (Bucket partition : partitions) {
-				String partitionName = partition.name();
+			int p = Integer.parseInt(partitionName.substring(partitionName.lastIndexOf('-') + 1));
+			partNum.set(p);
 
-				partNum.set(Integer.parseInt(partitionName.substring(partitionName.lastIndexOf('-') + 1)));
+			if (partition.contents().size() > 0)
+				totalReducers++;
 
-				for (String bucketId : partition.contents()) {
-					key.set(bucketId);
-
-					writer.append(key, partNum);
-				}
-			}
-		} finally {
-			try {
-				writer.close();
-			} catch (Exception e) {
-				LOG.error("Trapped exception during close: " + partitionMap, e);
+			for (String bucketId : partition.contents()) {
+				key.set(bucketId);
+				writer.append(key, partNum);
 			}
 		}
+		writer.close();
+
+                print(Verbosity.INFO, "\n\nNumber of allocated reducers = " + totalReducers);
+		job.setInt("mapreduce.job.reduces", totalReducers);
 
 		DataOutputStream countersStream = fs.create(this.counters);
-
-		try {
-			jobCounters.write(countersStream);
-		} finally {
-			try {
-				countersStream.close();
-			} catch (Exception e) {
-				LOG.error("Trapped exception during close: " + partitionMap, e);
-			}
-		}
+		jobCounters.write(countersStream);
+		countersStream.close();
 	}
 
 	/**
@@ -1322,15 +1432,15 @@ public class Crush extends Configured implements Tool {
 
 	public static void main(String[] args) throws Exception {
 
-    Configuration.addDefaultResource("hdfs-default.xml");
-    Configuration.addDefaultResource("hdfs-site.xml");
+		Configuration.addDefaultResource("hdfs-default.xml");
+		Configuration.addDefaultResource("hdfs-site.xml");
 
 		Crush crusher = new Crush();
 
 		int exitCode = ToolRunner.run(crusher, args);
 
 		System.exit(exitCode);
-  }
+	}
 
 	private enum Mode {
 		STAND_ALONE, MAP_REDUCE, CLONE
@@ -1342,5 +1452,5 @@ public class Crush extends Configured implements Tool {
 		}
 	}
 
-  private static final Log LOG = LogFactory.getLog(Crush.class);
+	private static final Log LOG = LogFactory.getLog(Crush.class);
 }

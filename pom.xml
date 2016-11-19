@@ -8,6 +8,9 @@
 	<description>filecrush utility</description>
 	<packaging>jar</packaging>
 	<properties>
+		<hadoop2.version>2.6.0-cdh5.7.2</hadoop2.version>
+		<avro.version>1.7.6-cdh5.7.2</avro.version>
+		<hive.version>1.1.0-cdh5.7.2</hive.version>
 		<hadoop.version>0.20.2</hadoop.version>
 		<commons-cli.version>1.2</commons-cli.version>
 		<commons-logging.version>1.0.4</commons-logging.version>
@@ -22,6 +25,13 @@
 		<easymock.version>3.0</easymock.version>
 		<jetty.version>6.1.14</jetty.version>
 	</properties>
+
+	<repositories>
+		<repository>
+			<id>cloudera</id>
+			<url>https://repository.cloudera.com/artifactory/cloudera-repos/</url>
+		</repository>
+	</repositories>
 
 	<build>
 
@@ -79,6 +89,24 @@
 
 
 	<dependencies>
+		<dependency>
+			<groupId>org.apache.avro</groupId>
+			<artifactId>avro-mapred</artifactId>
+			<version>${avro.version}</version>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.hadoop</groupId>
+			<artifactId>hadoop-common</artifactId>
+			<version>${hadoop2.version}</version>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.hive</groupId>
+			<artifactId>hive-exec</artifactId>
+			<version>${hive.version}</version>
+			<scope>provided</scope>
+		</dependency>
 		<dependency>
 			<groupId>org.apache.hadoop</groupId>
 			<artifactId>hadoop-core</artifactId>
