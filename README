@@ -1,3 +1,10 @@
+READ BEFORE BUILDING:
+   Avro/Parquet support has been added to filecrush but the Unit Tests are
+   still being reviewed and updated. I've pushed the completed changes due
+   to some requests but some tests still fail. Hence, when building 
+   filecrush add the '-DskipTests' option to the mvn command.
+   I'm finishing the tests review and will publish them asap. (Andre)
+
 Hadoop filecrusher.
 
 Turn many small files into fewer larger ones. Also change from text to sequence and other compression options in one pass.
