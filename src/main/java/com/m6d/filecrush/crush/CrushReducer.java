@@ -19,22 +19,16 @@ import static java.lang.String.format;
 
 import java.lang.Void;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.ArrayWritable;
 import org.apache.hadoop.io.NullWritable;
-import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.FileInputFormat;
 import org.apache.hadoop.mapred.InputSplit;
@@ -60,6 +54,7 @@ import org.apache.hadoop.hive.serde2.objectinspector.StructObjectInspector;
 import org.apache.hadoop.hive.ql.io.IOConstants;
 import org.apache.hadoop.hive.ql.exec.FileSinkOperator;
 import parquet.schema.MessageType;
+import parquet.schema.Type;
 import parquet.hadoop.ParquetFileReader;
 import parquet.hadoop.metadata.ParquetMetadata;
 import parquet.column.ColumnDescriptor;
@@ -112,7 +107,7 @@ public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, T
 	 */
 	private String inputFormat;
 	private String outputFormat;;
-        private ParquetHiveSerDe parquetSerDe;
+	private ParquetHiveSerDe parquetSerDe;
 
 	/**
 	 * Input formats that correspond with {@link #inputRegexList}.
@@ -139,6 +134,8 @@ public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, T
 	 * the reducer output.
 	 */
 	private String outDirPath;
+
+	HashMap<String, String> decimalTypesHashMap = new HashMap();
 
 	@Override
 	public void configure(JobConf job) {
@@ -285,7 +282,7 @@ public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, T
 
         private MessageType getParquetFileSchema(JobConf job, Path inputPath) throws IOException {
 		ParquetMetadata readFooter = ParquetFileReader.readFooter(job, inputPath);
-		return readFooter.getFileMetaData().getSchema();
+			return readFooter.getFileMetaData().getSchema();
         }
 
         private String getParquetFileSchemaString(JobConf job, Path inputPath) throws IOException {
@@ -354,8 +351,24 @@ public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, T
 					if (AvroContainerInputFormat.class.isAssignableFrom(getInputFormatClass(idx))) {
 						schemaSignature = getAvroFileSchemaString(job, inputPath);
 						job.set("avro.schema.literal", schemaSignature);
-                                        } else if (MapredParquetInputFormat.class.isAssignableFrom(getInputFormatClass(idx))) {
+					}
+					else if (MapredParquetInputFormat.class.isAssignableFrom(getInputFormatClass(idx))) {
 						MessageType schema = getParquetFileSchema(job, inputPath);
+						List <Type> fieldsFromSchema = schema.getFields();
+						for (Type field : fieldsFromSchema) {
+							if (field.getOriginalType()!=null) {
+								if (StringUtils.equals(field.getOriginalType().toString(), "DECIMAL")) {
+									String primitiveType = field.asPrimitiveType().toString();
+									int loc = primitiveType.indexOf("DECIMAL");
+									int start = loc + 7;
+									int end = primitiveType.indexOf(")", loc)+1;
+									String ps = primitiveType.substring(start, end);
+									if (!decimalTypesHashMap.containsKey(ps)){
+										decimalTypesHashMap.put(field.getName().toString(),ps);
+									}
+								}
+							}
+						}
 						schemaSignature = getParquetFileSchemaString(job, inputPath);
 						StringBuilder columnsSb = new StringBuilder();
 						StringBuilder columnsTypesSb = new StringBuilder();
@@ -387,22 +400,28 @@ public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, T
 								typeName = "double";
 							else if ("FLOAT".equals(typeName))
 								typeName = "float";
-//							else if (typeName.startsWith("FIXED_LEN_BYTE_ARRAY")) {
-//								typeName = col.getType().getOriginalType();
-//							}
+							else if (typeName.startsWith("FIXED_LEN_BYTE_ARRAY")) {
+								String column = col.toString();
+								int start = column.indexOf('[') + 1;
+								int end = column.indexOf(']');
+								String fieldName = column.substring(start,end);
+								String lookupVal = decimalTypesHashMap.get(fieldName);
+								LOG.info("final string: decimal"+lookupVal);
+								typeName="decimal"+lookupVal;
+							}
 							columnsTypesSb.append(typeName);
 						}
 						columns = columnsSb.toString();
 						columnsTypes = columnsTypesSb.toString();
 						jobProperties.put(IOConstants.COLUMNS, columns);
 						jobProperties.put(IOConstants.COLUMNS_TYPES, columnsTypes);
-						LOG.debug(format("COLUMNS:%s", columns));
-						LOG.debug(format("COLUMNS_TYPES:%s", columnsTypes));
 						parquetSerDe = new ParquetHiveSerDe();
 						parquetSerDe.initialize(job, jobProperties);
-                                        } else {
+						}
+						else {
 						schemaSignature = key.getClass().getName() + ":" + value.getClass().getName();
-                                        }
+						}
+
 
 					/*
 					 * Set the key and value class in the conf, which the output format uses to get type information.
@@ -413,7 +432,7 @@ public class CrushReducer extends MapReduceBase implements Reducer<Text, Text, T
 					/*
 					 * Output file name is absolute so we can just add it to the crush prefix.
 					 */
-                                       	if (MapredParquetOutputFormat.class.isAssignableFrom(getOutputFormatClass(idx))) {
+					if (MapredParquetOutputFormat.class.isAssignableFrom(getOutputFormatClass(idx))) {
 						outputFormat = "parquet";
 						parquetSink = createParquetRecordWriter(idx, valueOut.toString(), jobProperties, (Class<? extends org.apache.hadoop.io.Writable>)value.getClass(), reporter);
 					} else {
