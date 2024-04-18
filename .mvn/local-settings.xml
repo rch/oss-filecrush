@@ -1,0 +1,43 @@
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 http://maven.apache.org/xsd/settings-1.2.0.xsd">
+    <mirrors>
+        <mirror>
+            <id>conjars-unblocker</id>
+            <mirrorOf>conjars</mirrorOf>
+            <name></name>
+            <url>https://repo.spring.io/plugins-release/</url>
+        </mirror>
+        <mirror>
+            <id>java.net-repository-unblocker</id>
+            <mirrorOf>java.net repository</mirrorOf>
+            <name></name>
+            <url>http://download.java.net/maven/2</url>
+        </mirror>
+        <mirror>
+            <id>glassfish-repo-archive-unblocker</id>
+            <mirrorOf>glassfish-repo-archive</mirrorOf>
+            <name></name>
+            <url>http://maven.glassfish.org/content/groups/glassfish</url>
+        </mirror>
+        <mirror>
+            <id>glassfish-repository-unblocker</id>
+            <mirrorOf>glassfish-repository</mirrorOf>
+            <name></name>
+            <url>http://maven.glassfish.org/content/groups/glassfish</url>
+        </mirror>
+        <mirror>
+            <id>datanucleus-unblocker</id>
+            <mirrorOf>datanucleus</mirrorOf>
+            <name></name>
+            <url>http://www.datanucleus.org/downloads/maven2</url>
+        </mirror>
+        <mirror>
+            <id>martiansoftware-unblocker</id>
+            <mirrorOf>martiansoftware</mirrorOf>
+            <name></name>
+            <url>http://mvn.martiansoftware.com</url>
+        </mirror>
+    </mirrors>
+</settings>
+
